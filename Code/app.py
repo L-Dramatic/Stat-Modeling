@@ -122,22 +122,27 @@ st.markdown("""
 # 2. 核心逻辑函数 (逻辑保持不变)
 # ==========================================
 
+def get_hmm_features(df):
+    # 你这份 UCI 数据的典型气象列
+    candidate = ["DEWP", "TEMP", "PRES", "Iws", "Is", "Ir"]
+    feats = [c for c in candidate if c in df.columns]
+    return feats
+
+
 def normalize_column_names(df):
-    """标准化列名 (无UI交互，安全缓存)"""
     df = df.copy()
     column_mapping = {}
-    pm25_variants = ['PM2.5', 'pm2.5', 'PM2_5', 'pm2_5', 'PM25', 'pm25', 'PM 2.5', 'pm 2.5']
-    
+    pm25_variants = ['PM2.5','pm2.5','PM2_5','pm2_5','PM25','pm25','PM 2.5','pm 2.5']
+
     pm25_col = None
     for col in df.columns:
         if col in pm25_variants or col.strip() in pm25_variants:
             pm25_col = col
             break
-    
     if pm25_col and pm25_col != 'PM2.5':
         df.rename(columns={pm25_col: 'PM2.5'}, inplace=True)
-    
-    date_variants = ['date', 'Date', 'DATE', 'datetime', 'DateTime', 'DATETIME']
+
+    date_variants = ['date','Date','DATE','datetime','DateTime','DATETIME','time','Time','timestamp','utc_time']
     date_col = None
     for col in df.columns:
         if col in date_variants:
@@ -145,8 +150,9 @@ def normalize_column_names(df):
             break
     if date_col and date_col != 'date':
         df.rename(columns={date_col: 'date'}, inplace=True)
-    
+
     return df, column_mapping
+
 
 @st.cache_data
 def load_data(file_path):
@@ -191,23 +197,31 @@ def load_data(file_path):
         return None
 
 @st.cache_data
-def preprocess_data(df):
-    """数据预处理 (缓存)"""
-    if 'PM2.5' not in df.columns: return df
-    try:
-        preprocessor = DataPreprocessor(df=df)
-        df_processed = df.copy()
-        df_processed['PM2.5'] = df_processed['PM2.5'].interpolate(method='linear').bfill()
-        
-        # 简单的去异常值
-        mean = df_processed['PM2.5'].mean()
-        std = df_processed['PM2.5'].std()
-        df_processed['PM2.5'] = df_processed['PM2.5'].clip(lower=mean-3*std, upper=mean+3*std)
-        return df_processed
-    except:
-        df_processed = df.copy()
-        df_processed['PM2.5'] = df_processed['PM2.5'].interpolate().bfill()
-        return df_processed
+def preprocess_data(df, missing_method="interpolation", outlier_method="3sigma", do_log=False):
+    """数据预处理 (缓存) - 调用 DataPreprocessor"""
+    if 'PM2.5' not in df.columns:
+        return df
+
+    pre = DataPreprocessor(df=df)
+
+    # 1) 缺失值
+    pre.handle_missing_values(method=missing_method)
+
+    # 2) 异常值
+    if outlier_method != "none":
+        pre.remove_outliers(column="PM2.5", method=outlier_method)
+
+    df_processed = pre.get_processed_data()
+
+    # 3) log 变换：不替换原列，只增加一列方便对比
+    if do_log:
+        try:
+            df_processed["log_PM2.5"] = pre.log_transform("PM2.5")
+        except:
+            pass
+
+    return df_processed
+
 
 # ==========================================
 # 3. 页面视图函数 (UI 升级版)
@@ -300,6 +314,17 @@ def page_data_insight(df):
                 except Exception as e:
                     st.write(f"计算统计量时出错: {e}")
 
+def compute_vif(X_df):
+    import statsmodels.api as sm
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+    X = sm.add_constant(X_df).dropna()
+    vifs = []
+    for i in range(X.shape[1]):
+        vifs.append(variance_inflation_factor(X.values, i))
+    return pd.DataFrame({"feature": X.columns, "VIF": vifs}).sort_values("VIF", ascending=False)
+
+
 def page_attribution_analysis(df):
     st.markdown("## 🔍 归因分析实验室")
     st.info("💡 通过统计模型量化各个气象因子对 PM2.5 的具体贡献度。")
@@ -322,33 +347,66 @@ def page_attribution_analysis(df):
             with st.spinner("正在拟合模型..."):
                 try:
                     import statsmodels.api as sm
-                    X = sm.add_constant(df[selected_features]).dropna()
+                    X_raw = df[selected_features]
+                    X = sm.add_constant(X_raw).dropna()
                     y = df.loc[X.index, 'PM2.5']
-                    
+
                     if "OLS" in model_type:
                         model = sm.OLS(y, X).fit()
                         title = "OLS 线性回归结果"
+                        coefs = model.params.drop('const', errors='ignore')
+                        pvals = model.pvalues.drop('const', errors='ignore')
+
+                        st.markdown(f"#### 📊 {title}")
+
+                        fig, ax = plt.subplots(figsize=(10, 4))
+                        colors = ['#2ecc71' if p < 0.05 else '#95a5a6' for p in pvals]
+                        coefs.plot(kind='bar', color=colors, ax=ax)
+                        ax.set_title("Feature Coefficients (green = significant)", fontsize=10)
+                        ax.axhline(0, color='black', linewidth=0.8)
+                        st.pyplot(fig)
+
+                        with st.expander("📄 查看详细统计报表"):
+                            st.text(model.summary())
+
                     else:
-                        # 简易 GLM 模拟
-                        model = sm.GLM(y, X, family=sm.families.Gamma(link=sm.families.links.log())).fit()
-                        title = "GLM 广义线性模型结果"
-                    
-                    # 结果可视化卡片
-                    st.markdown(f"#### 📊 {title}")
-                    
-                    # 提取系数绘图
-                    coefs = model.params.drop('const', errors='ignore')
-                    pvals = model.pvalues.drop('const', errors='ignore')
-                    
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    colors = ['#2ecc71' if p < 0.05 else '#95a5a6' for p in pvals]
-                    coefs.plot(kind='bar', color=colors, ax=ax)
-                    ax.set_title("特征系数 (绿色代表显著)", fontsize=10)
-                    ax.axhline(0, color='black', linewidth=0.8)
-                    st.pyplot(fig)
-                    
-                    with st.expander("📄 查看详细统计报表"):
-                        st.text(model.summary())
+                        # ✅ 用你的 GLMModel
+                        glm = GLMModel()
+                        glm.fit(X_raw.dropna(), y.loc[X_raw.dropna().index])
+                        title = "GLM (Gamma + log link) 结果"
+
+                        st.markdown(f"#### 📊 {title}")
+
+                        sig = glm.get_significant_features(alpha=0.05)
+                        coefs = glm.results.params.drop('const', errors='ignore')
+                        pvals = glm.results.pvalues.drop('const', errors='ignore')
+
+                        fig, ax = plt.subplots(figsize=(10, 4))
+                        colors = ['#2ecc71' if p < 0.05 else '#95a5a6' for p in pvals]
+                        coefs.plot(kind='bar', color=colors, ax=ax)
+                        ax.set_title("GLM Coefficients (Gamma + log link)", fontsize=10)
+                        ax.axhline(0, color='black', linewidth=0.8)
+                        st.pyplot(fig)
+
+                        with st.expander("📌 显著因子解释（相对变化%）", expanded=True):
+                            if sig.empty:
+                                st.warning("没有显著因子（p<0.05）")
+                            else:
+                                for feat in sig.index:
+                                    st.write(glm.interpret_coefficient(feat))
+
+                        with st.expander("📄 查看 GLM 统计报表"):
+                            st.text(glm.get_summary())
+
+                    # ✅ VIF 共线性
+                    with st.expander("🧪 多重共线性诊断（VIF）", expanded=False):
+                        vif_df = compute_vif(df[selected_features])
+                        st.dataframe(vif_df, use_container_width=True)
+                        high_vif = vif_df[vif_df["VIF"] > 10]
+                        if len(high_vif) > 0:
+                            st.warning("以下变量 VIF>10，共线性较强，建议删减或合并：")
+                            st.write(high_vif)
+
                         
                 except Exception as e:
                     st.error(f"建模失败: {str(e)}")
@@ -361,40 +419,136 @@ def page_attribution_analysis(df):
 
 def page_warning_center(df):
     st.markdown("## ⚠️ 智能预警中心")
-    
-    # 模拟仪表盘布局
-    col_kpi1, col_kpi2 = st.columns(2)
-    
-    with col_kpi1:
-        st.markdown("### 🎲 状态识别 (HMM)")
-        st.markdown("通过隐马尔可夫模型识别当前污染阶段。")
-        
-        if st.button("🔄 刷新状态识别", use_container_width=True):
-            # 模拟 HMM 结果
-            state = np.random.choice(['🟢 优良', '🟡 轻度累积', '🔴 重度污染'], p=[0.5, 0.3, 0.2])
-            st.success(f"当前推断状态: **{state}**")
-            
-            st.progress(np.random.randint(60, 90), text="模型置信度")
 
-    with col_kpi2:
-        st.markdown("### 🔮 趋势预测 (ARIMA)")
-        steps = st.slider("预测未来小时数", 12, 72, 24)
-        
-        if st.button("🚀 生成预测", type="primary", use_container_width=True):
-            if isinstance(df.index, pd.DatetimeIndex):
-                try:
-                    # 简单模拟预测曲线，实际应调用 ARIMA_model
-                    last_val = df['PM2.5'].iloc[-1]
-                    pred = [last_val * (1 + np.sin(x/5)*0.1 + np.random.normal(0, 0.05)) for x in range(steps)]
-                    
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(y=pred, mode='lines+markers', name='Forecast', line=dict(color='#9b59b6')))
-                    fig.update_layout(title=f"未来 {steps} 小时走势预测", height=300, margin=dict(t=30,b=0,l=0,r=0))
-                    st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.error(f"预测错误: {e}")
-            else:
-                st.error("需要时间索引数据")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        st.error("当前数据没有时间索引，无法进行 HMM/ARIMA 预警。")
+        return
+
+    # =======================
+    # 1) HMM 状态识别
+    # =======================
+    st.markdown("### 🎲 状态识别 (HMM)")
+    feats = get_hmm_features(df)
+
+    if len(feats) == 0:
+        st.warning("未找到气象特征列（DEWP/TEMP/PRES/Iws/Is/Ir），无法拟合 HMM。")
+    else:
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            n_states = st.slider("隐状态数量", 2, 5, 3)
+            hmm_mode = st.radio("状态定义方式", ["阈值（国标）", "分位数"], index=0)
+
+            run_hmm = st.button("🚀 拟合 HMM 并推断当前状态", use_container_width=True)
+
+        with col2:
+            st.markdown("**HMM 观测特征：** " + ", ".join(feats))
+
+        if run_hmm:
+            with st.spinner("HMM 训练中..."):
+                obs = df[feats].dropna()
+                pm25 = df.loc[obs.index, "PM2.5"].dropna()
+                obs = obs.loc[pm25.index]
+
+                hmm_model = HMMModel(n_states=n_states)
+
+                # 用 PM2.5 来定义 state 的阈值/分位数（在模型里）
+                hmm_model.fit(obs.values, pm25_values=pm25.values)
+
+                # 推断全序列状态
+                states = hmm_model.predict_states(obs.values)
+
+                # ✅ 对齐状态含义：按每个 state 的 PM2.5 均值排序
+                state_means = {}
+                for s in range(n_states):
+                    state_means[s] = pm25.values[states == s].mean()
+
+                sorted_states = sorted(state_means, key=state_means.get)
+                mapped_names = []
+                if n_states == 3 and hmm_mode.startswith("阈值"):
+                    mapped_names = ["优良", "轻度污染", "重度污染"]
+                else:
+                    mapped_names = [f"状态{i+1}" for i in range(n_states)]
+
+                mapping = {s: mapped_names[i] for i, s in enumerate(sorted_states)}
+                current_state = mapping[states[-1]]
+
+                st.success(f"当前隐状态：**{current_state}**")
+                mean_df = pd.DataFrame({
+                    "state": list(state_means.keys()),
+                    "PM2.5_mean": list(state_means.values())
+                }).sort_values("PM2.5_mean")
+                st.markdown("**各状态 PM2.5 均值（用于解释对齐）：**")
+                st.dataframe(mean_df, use_container_width=True)
+
+                st.markdown("#### 🔁 状态转移矩阵")
+                trans = hmm_model.get_transition_matrix().copy()
+                # 重新按 mapping 排序/重命名
+                trans.index = [mapping.get(i, i) for i in trans.index]
+                trans.columns = [mapping.get(i, i) for i in trans.columns]
+                st.dataframe(trans, use_container_width=True)
+
+                st.markdown("#### 📌 最近 7 天隐状态序列")
+                last_idx = obs.index[-24*7:] if len(obs) >= 24*7 else obs.index
+                last_states = states[-len(last_idx):]
+                state_series = pd.Series([mapping[s] for s in last_states], index=last_idx)
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=state_series.index, y=state_series.values, mode="lines"))
+                fig.update_layout(height=250, margin=dict(t=20,b=0,l=0,r=0))
+                st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # =======================
+    # 2) ARIMA 短期预测
+    # =======================
+    st.markdown("### 🔮 趋势预测 (ARIMA)")
+
+    steps = st.slider("预测未来小时数", 12, 72, 24)
+    run_arima = st.button("📈 生成 ARIMA 预测", type="primary", use_container_width=True)
+
+    if run_arima:
+        with st.spinner("ARIMA 拟合与预测中..."):
+            series = df["PM2.5"].dropna()
+
+            arima = ARIMAModel()
+
+            # 平稳性检验
+            stat_res = arima.check_stationarity(series)
+            st.write("ADF 检验结果：", stat_res)
+
+            # 拟合（自动选参）
+            arima.fit(series, auto_select=True)
+
+            # 预测
+            forecast_df = arima.predict(steps=steps, alpha=0.05)
+
+            st.markdown("#### 📊 预测曲线（含95%置信区间）")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=series.index, y=series.values, mode="lines", name="历史 PM2.5"
+            ))
+            fig.add_trace(go.Scatter(
+                x=forecast_df.index, y=forecast_df["forecast"],
+                mode="lines+markers", name="预测"
+            ))
+            fig.add_trace(go.Scatter(
+                x=forecast_df.index, y=forecast_df["upper"],
+                mode="lines", name="上界", line=dict(width=0),
+                showlegend=False
+            ))
+            fig.add_trace(go.Scatter(
+                x=forecast_df.index, y=forecast_df["lower"],
+                mode="lines", name="下界", fill="tonexty",
+                line=dict(width=0), showlegend=False
+            ))
+            fig.update_layout(height=350, margin=dict(t=20,b=0,l=0,r=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+            with st.expander("📄 ARIMA 模型摘要"):
+                st.text(arima.get_summary())
+
 
 # ==========================================
 # 4. 主程序入口
@@ -435,14 +589,17 @@ def main():
         # 数据加载区
         with st.expander("📂 数据管理", expanded=True):
             uploaded_file = st.file_uploader("上传 CSV", type=['csv'])
+            st.markdown("### 🧹 预处理设置")
+            missing_method = st.selectbox("缺失值处理", ["interpolation", "drop"], index=0)
+            outlier_method = st.selectbox("异常值处理", ["3sigma", "iqr", "none"], index=0)
+            do_log = st.checkbox("对 PM2.5 做 Log 变换（用于检验/建模对比）", value=False)    
             if st.button("🔄 加载测试数据"):
                 if os.path.exists(default_data_path):
                     st.session_state['data'] = load_data(default_data_path)
                     if 'processed_data' in st.session_state: del st.session_state['processed_data']
                     st.rerun()
                 else:
-                    st.error("测试文件未找到")
-                    
+                    st.error("测试文件未找到")              
         if 'data' in st.session_state:
             st.success(f"已加载 {len(st.session_state['data'])} 条数据")
 
@@ -452,7 +609,13 @@ def main():
         
         if 'processed_data' not in st.session_state:
             with st.spinner("正在进行智能清洗与预处理..."):
-                df_processed = preprocess_data(df)
+                df_processed = preprocess_data(
+                    df,
+                    missing_method=missing_method,
+                    outlier_method=outlier_method,
+                    do_log=do_log
+                )
+
                 st.session_state['processed_data'] = df_processed
         else:
             df_processed = st.session_state['processed_data']
