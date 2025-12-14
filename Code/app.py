@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.graph_objects as go
+import statsmodels.api as sm
 import sys
 import os
 
@@ -18,6 +19,10 @@ except ImportError:
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
 
+# 设置matplotlib中文字体支持（解决中文乱码问题）
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans', 'Arial Unicode MS', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
 # 添加Code目录到路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,7 +33,14 @@ try:
     from glm_model import GLMModel
     from arima_model import ARIMAModel
     from hmm_model import HMMModel
-except ImportError:
+    # 新增模块
+    from classification_models import ClassificationModels
+    from model_evaluation import ModelEvaluator
+    from bayesian_models import BayesianModels
+    from regression_models import RegressionModels
+    from feature_selection import FeatureSelector
+except ImportError as e:
+    st.warning(f"部分模块导入失败: {e}")
     pass
 
 # ==========================================
@@ -161,6 +173,9 @@ def load_data(file_path):
         if isinstance(file_path, str):
             df = pd.read_csv(file_path, na_values=['NA', 'NaN', '?', 'null'])
         else:
+            # 如果是上传的文件对象，需要重置指针
+            if hasattr(file_path, 'seek'):
+                file_path.seek(0)
             df = pd.read_csv(file_path, na_values=['NA', 'NaN', '?', 'null'])
         
         df, mapping = normalize_column_names(df)
@@ -505,21 +520,39 @@ def page_warning_center(df):
     # =======================
     st.markdown("### 🔮 趋势预测 (ARIMA)")
 
-    steps = st.slider("预测未来小时数", 12, 72, 24)
+    col_arima1, col_arima2 = st.columns([2, 1])
+    with col_arima1:
+        steps = st.slider("预测未来小时数", 12, 72, 24)
+    with col_arima2:
+        use_auto_select = st.checkbox("自动选择参数（较慢）", value=False, help="取消勾选将使用默认参数(1,1,1)，速度更快")
+    
     run_arima = st.button("📈 生成 ARIMA 预测", type="primary", use_container_width=True)
 
     if run_arima:
-        with st.spinner("ARIMA 拟合与预测中..."):
-            series = df["PM2.5"].dropna()
+        series = df["PM2.5"].dropna()
+        
+        # 如果数据量太大，提示降采样
+        if len(series) > 10000:
+            st.info(f"💡 数据量较大（{len(series)}条），为加快速度将自动降采样")
+            # 降采样到最近10000条
+            series = series.iloc[-10000:]
+        
+        arima = ARIMAModel()
 
-            arima = ARIMAModel()
-
-            # 平稳性检验
+        # 平稳性检验
+        with st.spinner("正在进行平稳性检验..."):
             stat_res = arima.check_stationarity(series)
             st.write("ADF 检验结果：", stat_res)
 
-            # 拟合（自动选参）
-            arima.fit(series, auto_select=True)
+        # 拟合
+        if use_auto_select:
+            with st.spinner("正在自动选择ARIMA参数（这可能需要1-2分钟，请耐心等待）..."):
+                arima.fit(series, auto_select=True)
+                st.success(f"✅ 自动选择参数：ARIMA{arima.order}")
+        else:
+            with st.spinner("正在拟合ARIMA模型（使用默认参数(1,1,1)）..."):
+                arima.fit(series, auto_select=False, order=(1, 1, 1))
+                st.success("✅ 使用默认参数：ARIMA(1,1,1)")
 
             # 预测
             forecast_df = arima.predict(steps=steps, alpha=0.05)
@@ -550,6 +583,279 @@ def page_warning_center(df):
                 st.text(arima.get_summary())
 
 
+def page_model_arena(df):
+    """模型竞技场页面 - 回归模型对比"""
+    st.markdown("## ⚔️ 模型竞技场")
+    st.info("💡 对比不同回归模型的性能，展示模型选择过程。")
+    
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    features = [c for c in numeric_cols if c not in ['PM2.5', 'No', 'year', 'month', 'day', 'hour']]
+    
+    if len(features) == 0:
+        st.warning("未找到可用的特征变量")
+        return
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown("#### ⚙️ 参数配置")
+        selected_features = st.multiselect("选择特征变量", features, default=features[:4] if len(features) >= 4 else features)
+        use_lasso_selection = st.checkbox("使用Lasso进行特征筛选", value=False)
+        run_models = st.button("🚀 运行所有模型", type="primary", use_container_width=True)
+    
+    with col2:
+        if run_models and selected_features:
+            with st.spinner("正在拟合模型并计算评估指标..."):
+                try:
+                    X_raw = df[selected_features].dropna()
+                    y = df.loc[X_raw.index, 'PM2.5'].dropna()
+                    X_raw = X_raw.loc[y.index]
+                    
+                    # 特征选择
+                    selected_X = X_raw
+                    if use_lasso_selection:
+                        selector = FeatureSelector()
+                        result = selector.lasso_selection(X_raw, y)
+                        selected_X = X_raw[result['selected_features']]
+                        st.success(f"Lasso筛选出 {result['n_selected']}/{result['n_total']} 个重要特征")
+                        
+                        fig, ax = selector.plot_feature_importance(top_n=min(10, len(selected_features)))
+                        st.pyplot(fig)
+                    
+                    # 拟合多个模型
+                    reg_models = RegressionModels()
+                    evaluator = ModelEvaluator()
+                    
+                    models_results = {}
+                    
+                    # OLS
+                    ols_model = reg_models.fit_ols(selected_X, y)
+                    y_pred_ols = ols_model.predict(sm.add_constant(selected_X))
+                    models_results['OLS'] = {
+                        'y_true': y,
+                        'y_pred': y_pred_ols,
+                        'model': ols_model
+                    }
+                    
+                    # Ridge
+                    ridge_model = reg_models.fit_ridge(selected_X, y, cv=True)
+                    y_pred_ridge = ridge_model.predict(reg_models.scaler.transform(selected_X.values))
+                    models_results['Ridge'] = {
+                        'y_true': y,
+                        'y_pred': y_pred_ridge,
+                        'model': ridge_model
+                    }
+                    
+                    # Lasso
+                    lasso_model = reg_models.fit_lasso(selected_X, y, cv=True)
+                    y_pred_lasso = lasso_model.predict(reg_models.scaler.transform(selected_X.values))
+                    models_results['Lasso'] = {
+                        'y_true': y,
+                        'y_pred': y_pred_lasso,
+                        'model': lasso_model
+                    }
+                    
+                    # GLM
+                    glm_model = reg_models.fit_glm(selected_X, y)
+                    y_pred_glm = glm_model.predict(selected_X)
+                    models_results['GLM'] = {
+                        'y_true': y,
+                        'y_pred': y_pred_glm,
+                        'model': glm_model.results
+                    }
+                    
+                    # Bayesian Ridge
+                    bayesian = BayesianModels()
+                    bayesian.fit_bayesian_regression(selected_X, y)
+                    y_pred_bayesian, y_std = bayesian.predict_bayesian_regression(selected_X)
+                    models_results['Bayesian Ridge'] = {
+                        'y_true': y,
+                        'y_pred': y_pred_bayesian,
+                        'model': bayesian.bayesian_ridge_model
+                    }
+                    
+                    # 模型对比
+                    st.markdown("#### 📊 模型性能对比")
+                    comparison_df = evaluator.compare_models(models_results, metric_type='regression')
+                    st.dataframe(comparison_df.style.highlight_max(axis=0, subset=['R²']).highlight_min(axis=0, subset=['AIC', 'BIC', 'RMSE', 'MAE']), use_container_width=True)
+                    
+                    # 残差分析
+                    st.markdown("#### 📈 残差分析")
+                    model_choice = st.selectbox("选择模型查看残差", list(models_results.keys()))
+                    if model_choice:
+                        fig = evaluator.plot_residuals(
+                            models_results[model_choice]['y_true'],
+                            models_results[model_choice]['y_pred']
+                        )
+                        st.pyplot(fig)
+                        
+                        # Durbin-Watson检验
+                        dw_result = evaluator.durbin_watson_test(
+                            models_results[model_choice]['y_true'] - models_results[model_choice]['y_pred']
+                        )
+                        st.info(f"Durbin-Watson统计量: {dw_result['dw_statistic']:.4f} - {dw_result['interpretation']}")
+                    
+                    # 贝叶斯后验分布
+                    st.markdown("#### 🎲 贝叶斯方法：参数后验分布")
+                    fig, ax = bayesian.plot_posterior(feature_names=selected_X.columns.tolist())
+                    st.pyplot(fig)
+                    
+                except Exception as e:
+                    st.error(f"模型拟合失败: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+
+def page_classification(df):
+    """分类与状态页面 - 分类模型对比"""
+    st.markdown("## 🎯 分类与状态")
+    st.info("💡 对比Logistic Regression、Naive Bayes和HMM的分类性能。")
+    
+    if 'PM2.5' not in df.columns:
+        st.error("数据中未找到PM2.5列")
+        return
+    
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    features = [c for c in numeric_cols if c not in ['PM2.5', 'No', 'year', 'month', 'day', 'hour']]
+    
+    if len(features) == 0:
+        st.warning("未找到可用的特征变量")
+        return
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown("#### ⚙️ 参数配置")
+        selected_features = st.multiselect("选择特征变量", features, default=features[:4] if len(features) >= 4 else features)
+        run_classification = st.button("🚀 运行分类模型", type="primary", use_container_width=True)
+    
+    with col2:
+        if run_classification and selected_features:
+            with st.spinner("正在训练分类模型..."):
+                try:
+                    X = df[selected_features].dropna()
+                    y_pm25 = df.loc[X.index, 'PM2.5'].dropna()
+                    X = X.loc[y_pm25.index]
+                    
+                    # 初始化分类模型
+                    clf_models = ClassificationModels()
+                    evaluator = ModelEvaluator()
+                    
+                    # Logistic Regression
+                    clf_models.fit_logistic(X, pm25_values=y_pm25.values)
+                    y_pred_logistic = clf_models.predict_logistic(X)
+                    y_proba_logistic = clf_models.predict_proba_logistic(X)
+                    
+                    # Naive Bayes
+                    clf_models.fit_naive_bayes(X, pm25_values=y_pm25.values)
+                    y_pred_nb = clf_models.predict_naive_bayes(X)
+                    y_proba_nb = clf_models.predict_proba_naive_bayes(X)
+                    
+                    # 转换为分类标签（用于评估）
+                    y_true = clf_models._pm25_to_category(y_pm25.values)
+                    
+                    # 评估
+                    eval_logistic = clf_models.evaluate(y_true, y_pred_logistic, y_proba_logistic, "Logistic Regression")
+                    eval_nb = clf_models.evaluate(y_true, y_pred_nb, y_proba_nb, "Naive Bayes")
+                    
+                    # HMM（使用现有HMM模块）
+                    hmm_feats = get_hmm_features(df)
+                    if len(hmm_feats) > 0:
+                        hmm_obs = df[hmm_feats].loc[X.index].dropna()
+                        hmm_pm25 = y_pm25.loc[hmm_obs.index]
+                        hmm_obs = hmm_obs.loc[hmm_pm25.index]
+                        
+                        hmm_model = HMMModel(n_states=3)
+                        hmm_model.fit(hmm_obs.values, pm25_values=hmm_pm25.values)
+                        hmm_states = hmm_model.predict_states(hmm_obs.values)
+                        
+                        # 对齐HMM状态和分类标签
+                        state_means = {}
+                        for s in range(3):
+                            state_means[s] = hmm_pm25.values[hmm_states == s].mean() if np.sum(hmm_states == s) > 0 else 0
+                        sorted_states = sorted(state_means, key=state_means.get)
+                        state_mapping = {sorted_states[i]: i for i in range(3)}
+                        hmm_labels = np.array([state_mapping[s] for s in hmm_states])
+                        y_true_hmm = clf_models._pm25_to_category(hmm_pm25.values)
+                        eval_hmm = evaluator.classification_metrics(y_true_hmm, hmm_labels)
+                    else:
+                        eval_hmm = None
+                    
+                    # 展示结果
+                    st.markdown("#### 📊 分类模型性能对比")
+                    comparison_data = {
+                        'Logistic Regression': {
+                            'Accuracy': eval_logistic['accuracy'],
+                            'Precision (Macro)': eval_logistic['precision_macro'],
+                            'Recall (Macro)': eval_logistic['recall_macro'],
+                            'F1-Score (Macro)': eval_logistic['f1_macro'],
+                            'AUC': eval_logistic['auc_score']
+                        },
+                        'Naive Bayes': {
+                            'Accuracy': eval_nb['accuracy'],
+                            'Precision (Macro)': eval_nb['precision_macro'],
+                            'Recall (Macro)': eval_nb['recall_macro'],
+                            'F1-Score (Macro)': eval_nb['f1_macro'],
+                            'AUC': eval_nb['auc_score']
+                        }
+                    }
+                    
+                    if eval_hmm:
+                        comparison_data['HMM'] = {
+                            'Accuracy': eval_hmm['accuracy'],
+                            'Precision (Macro)': eval_hmm['precision_macro'],
+                            'Recall (Macro)': eval_hmm['recall_macro'],
+                            'F1-Score (Macro)': eval_hmm['f1_macro'],
+                            'AUC': eval_hmm['auc_score']
+                        }
+                    
+                    comparison_df = pd.DataFrame(comparison_data).T
+                    st.dataframe(comparison_df.style.highlight_max(axis=0), use_container_width=True)
+                    
+                    # 混淆矩阵对比
+                    col_cm1, col_cm2 = st.columns(2)
+                    with col_cm1:
+                        st.markdown("**Logistic Regression 混淆矩阵**")
+                        fig, ax = evaluator.plot_confusion_matrix(y_true, y_pred_logistic, clf_models.get_class_names())
+                        st.pyplot(fig)
+                    
+                    with col_cm2:
+                        st.markdown("**Naive Bayes 混淆矩阵**")
+                        fig, ax = evaluator.plot_confusion_matrix(y_true, y_pred_nb, clf_models.get_class_names())
+                        st.pyplot(fig)
+                    
+                    # ROC曲线对比
+                    st.markdown("#### 📈 ROC曲线对比")
+                    fig, ax = evaluator.plot_roc_curve(y_true, y_proba_logistic, clf_models.get_class_names())
+                    st.pyplot(fig)
+                    
+                except Exception as e:
+                    st.error(f"分类模型训练失败: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+
+def page_evaluation_center(df):
+    """评估中心页面 - 统一评估所有模型"""
+    st.markdown("## 📋 评估中心")
+    st.info("💡 统一展示所有模型的评估指标和性能对比。")
+    
+    st.markdown("### 📊 回归模型评估")
+    st.markdown('请在"模型竞技场"页面运行回归模型后，评估结果将显示在这里。')
+    
+    st.markdown("### 🎯 分类模型评估")
+    st.markdown('请在"分类与状态"页面运行分类模型后，评估结果将显示在这里。')
+    
+    st.markdown("### 💡 使用说明")
+    st.markdown("""
+    1. **回归模型评估**：前往"模型竞技场"页面，选择特征并运行模型
+    2. **分类模型评估**：前往"分类与状态"页面，选择特征并运行分类模型
+    3. 所有评估指标包括：
+       - 回归：RMSE, MAE, R², AIC, BIC
+       - 分类：Accuracy, Precision, Recall, F1-Score, AUC
+    """)
+
+
 # ==========================================
 # 4. 主程序入口
 # ==========================================
@@ -562,7 +868,7 @@ def main():
     with st.sidebar:
         st.image("https://cdn-icons-png.flaticon.com/512/3208/3208728.png", width=60)
         st.markdown("### 空气质量监测系统")
-        st.markdown("Version 2.0 | Pro Edition")
+        st.markdown("Version 3.0 | Ultimate Edition")
         
         st.markdown("---")
         
@@ -570,8 +876,8 @@ def main():
         if HAS_OPTION_MENU:
             selected = option_menu(
                 menu_title=None,
-                options=["数据洞察", "归因分析", "预警中心"],
-                icons=["bar-chart-fill", "search", "shield-exclamation"],
+                options=["数据洞察", "归因分析", "⚔️ 模型竞技场", "🎯 分类与状态", "预警中心", "📋 评估中心"],
+                icons=["bar-chart-fill", "search", "trophy", "target", "shield-exclamation", "clipboard-data"],
                 menu_icon="cast",
                 default_index=0,
                 styles={
@@ -582,26 +888,197 @@ def main():
                 }
             )
         else:
-            selected = st.radio("导航", ["数据洞察", "归因分析", "预警中心"])
+            selected = st.radio("导航", ["数据洞察", "归因分析", "⚔️ 模型竞技场", "🎯 分类与状态", "预警中心", "📋 评估中心"])
         
         st.markdown("---")
         
         # 数据加载区
         with st.expander("📂 数据管理", expanded=True):
-            uploaded_file = st.file_uploader("上传 CSV", type=['csv'])
+            # 文件上传区域
+            st.markdown("#### 📤 上传数据文件")
+            uploaded_file = st.file_uploader(
+                "选择 CSV 文件",
+                type=['csv'],
+                help="支持最大200MB的CSV文件，必须包含PM2.5列"
+            )
+            
+            # 文件信息显示和确认
+            if uploaded_file is not None:
+                # 显示文件基本信息
+                file_size_mb = uploaded_file.size / (1024 * 1024)
+                
+                col_info1, col_info2, col_info3 = st.columns(3)
+                with col_info1:
+                    st.metric("📄 文件名", uploaded_file.name[:20] + "..." if len(uploaded_file.name) > 20 else uploaded_file.name)
+                with col_info2:
+                    st.metric("📊 文件大小", f"{file_size_mb:.2f} MB")
+                with col_info3:
+                    st.metric("📋 文件类型", "CSV")
+                
+                # 文件验证和预览
+                with st.expander("🔍 文件预览与验证", expanded=True):
+                    try:
+                        # 读取前几行进行预览（使用getvalue()获取副本，不影响原文件指针）
+                        import io
+                        file_content = uploaded_file.getvalue()
+                        preview_df = pd.read_csv(io.StringIO(file_content.decode('utf-8')), nrows=5)
+                        
+                        st.markdown("**前5行数据预览：**")
+                        st.dataframe(preview_df, use_container_width=True)
+                        
+                        # 检查必需列
+                        columns_lower = [col.lower() for col in preview_df.columns]
+                        has_pm25 = any('pm2.5' in col or 'pm25' in col or 'pm 2.5' in col for col in columns_lower)
+                        has_date = any('date' in col or 'time' in col or 'datetime' in col for col in columns_lower)
+                        
+                        col_check1, col_check2 = st.columns(2)
+                        with col_check1:
+                            if has_pm25:
+                                st.success("✅ 检测到PM2.5列")
+                            else:
+                                st.error("❌ 未检测到PM2.5列（必需）")
+                        with col_check2:
+                            if has_date:
+                                st.success("✅ 检测到日期列")
+                            else:
+                                st.warning("⚠️ 未检测到日期列（时间序列功能可能受限）")
+                        
+                        # 显示列信息
+                        st.markdown(f"**数据列 ({len(preview_df.columns)}个)：**")
+                        st.text(", ".join(preview_df.columns.tolist()[:10]))
+                        if len(preview_df.columns) > 10:
+                            st.text(f"... 还有 {len(preview_df.columns) - 10} 个列")
+                        
+                    except Exception as e:
+                        st.error(f"⚠️ 文件预览失败: {str(e)}")
+                        st.info("💡 文件可能不是有效的CSV格式，但仍可尝试加载")
+                
+                # 确认加载按钮
+                st.markdown("---")
+                col_btn1, col_btn2 = st.columns([1, 1])
+                
+                with col_btn1:
+                    if st.button("✅ 确认加载此文件", type="primary", use_container_width=True):
+                        with st.spinner("正在加载文件..."):
+                            try:
+                                # 重置文件指针
+                                uploaded_file.seek(0)
+                                
+                                # 显示加载进度（模拟）
+                                progress_bar = st.progress(0)
+                                status_text = st.empty()
+                                
+                                status_text.text("📥 读取文件...")
+                                progress_bar.progress(20)
+                                
+                                # 加载数据
+                                df_uploaded = load_data(uploaded_file)
+                                progress_bar.progress(60)
+                                
+                                if df_uploaded is not None:
+                                    status_text.text("✅ 验证数据格式...")
+                                    progress_bar.progress(80)
+                                    
+                                    # 保存数据
+                                    st.session_state['data'] = df_uploaded
+                                    if 'processed_data' in st.session_state:
+                                        del st.session_state['processed_data']
+                                    
+                                    progress_bar.progress(100)
+                                    status_text.text("✅ 加载完成！")
+                                    
+                                    # 显示成功信息
+                                    st.success(f"""
+                                    **✅ 文件加载成功！**
+                                    
+                                    - 📄 文件名: {uploaded_file.name}
+                                    - 📊 数据量: {len(df_uploaded):,} 条记录
+                                    - 📋 列数: {len(df_uploaded.columns)} 个
+                                    - 🌫️ PM2.5范围: {df_uploaded['PM2.5'].min():.1f} ~ {df_uploaded['PM2.5'].max():.1f} μg/m³
+                                    """)
+                                    
+                                    # 延迟后刷新页面
+                                    import time
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    progress_bar.progress(0)
+                                    status_text.empty()
+                                    st.error("""
+                                    **❌ 文件加载失败**
+                                    
+                                    可能的原因：
+                                    - 文件不包含PM2.5列（必需）
+                                    - 文件格式不正确
+                                    - 文件编码问题
+                                    
+                                    💡 请检查文件格式，确保包含PM2.5列
+                                    """)
+                            except Exception as e:
+                                progress_bar.progress(0)
+                                status_text.empty()
+                                st.error(f"""
+                                **❌ 文件加载出错**
+                                
+                                错误信息: {str(e)}
+                                
+                                💡 请检查：
+                                - 文件是否为有效的CSV格式
+                                - 文件编码是否为UTF-8
+                                - 文件是否损坏
+                                """)
+                                import traceback
+                                with st.expander("🔍 查看详细错误信息"):
+                                    st.code(traceback.format_exc())
+                
+                with col_btn2:
+                    if st.button("❌ 取消", use_container_width=True):
+                        # 清除上传的文件（通过刷新）
+                        st.session_state.pop('uploaded_file', None)
+                        st.rerun()
+            
+            else:
+                # 未上传文件时的提示
+                st.info("💡 请上传CSV文件，或使用下方的测试数据")
+            
+            st.markdown("---")
             st.markdown("### 🧹 预处理设置")
             missing_method = st.selectbox("缺失值处理", ["interpolation", "drop"], index=0)
             outlier_method = st.selectbox("异常值处理", ["3sigma", "iqr", "none"], index=0)
             do_log = st.checkbox("对 PM2.5 做 Log 变换（用于检验/建模对比）", value=False)    
-            if st.button("🔄 加载测试数据"):
+            
+            st.markdown("---")
+            st.markdown("### 🧪 或使用测试数据")
+            st.caption("快速加载项目自带的UCI Beijing PM2.5数据集（2010-2014年）")
+            if st.button("🔄 加载测试数据", use_container_width=True):
                 if os.path.exists(default_data_path):
                     st.session_state['data'] = load_data(default_data_path)
-                    if 'processed_data' in st.session_state: del st.session_state['processed_data']
+                    if 'processed_data' in st.session_state: 
+                        del st.session_state['processed_data']
+                    st.success("✅ 测试数据加载成功")
                     st.rerun()
                 else:
-                    st.error("测试文件未找到")              
+                    # 尝试其他可能的文件名
+                    alternative_paths = [
+                        os.path.normpath(os.path.join(current_script_dir, '..', 'Data', 'PRSA_data.csv')),
+                        os.path.normpath(os.path.join(current_script_dir, '..', 'Data', 'beijing+pm2+5+data', 'PRSA_data.csv')),
+                    ]
+                    found = False
+                    for alt_path in alternative_paths:
+                        if os.path.exists(alt_path):
+                            st.session_state['data'] = load_data(alt_path)
+                            if 'processed_data' in st.session_state: 
+                                del st.session_state['processed_data']
+                            st.success(f"✅ 找到数据文件: {alt_path}")
+                            st.rerun()
+                            found = True
+                            break
+                    if not found:
+                        st.error(f"❌ 测试文件未找到。请检查以下路径：\n- {default_data_path}\n- {alternative_paths[0]}")
+                        st.info("💡 提示：您也可以使用上方的文件上传功能上传CSV文件")
+                      
         if 'data' in st.session_state:
-            st.success(f"已加载 {len(st.session_state['data'])} 条数据")
+            st.success(f"📊 已加载 {len(st.session_state['data'])} 条数据")
 
     # 主逻辑路由
     if 'data' in st.session_state:
@@ -625,8 +1102,14 @@ def main():
             page_data_insight(df_processed)
         elif selected == "归因分析":
             page_attribution_analysis(df_processed)
+        elif selected == "⚔️ 模型竞技场" or selected == "模型竞技场":
+            page_model_arena(df_processed)
+        elif selected == "🎯 分类与状态" or selected == "分类与状态":
+            page_classification(df_processed)
         elif selected == "预警中心":
             page_warning_center(df_processed)
+        elif selected == "📋 评估中心" or selected == "评估中心":
+            page_evaluation_center(df_processed)
             
     else:
         # 欢迎页（空状态）

@@ -108,9 +108,23 @@ class ARIMAModel:
         --------
         tuple : (order, seasonal_order)
         """
+        # 如果数据量太大，先降采样以加快速度
+        if len(series) > 5000:
+            # 降采样到5000个点
+            step = len(series) // 5000
+            series = series.iloc[::step]
+        
         best_aic = np.inf
         best_order = None
         best_seasonal_order = None
+        
+        # 优化搜索范围：减少组合数量
+        # 限制搜索范围以提高速度
+        max_p = min(max_p, 2)  # 限制最大p为2
+        max_d = min(max_d, 2)  # 限制最大d为2
+        max_q = min(max_q, 2)  # 限制最大q为2
+        
+        total_combinations = (max_p + 1) * (max_d + 1) * (max_q + 1)
         
         # 简化搜索（实际应该用更智能的方法）
         for p in range(max_p + 1):
@@ -123,7 +137,8 @@ class ARIMAModel:
                         else:
                             model = ARIMA(series, order=(p, d, q))
                         
-                        fitted_model = model.fit()
+                        # 使用更快的拟合方法
+                        fitted_model = model.fit(method_kwargs={"maxiter": 50})  # 限制迭代次数
                         aic = fitted_model.aic
                         
                         if aic < best_aic:
@@ -189,10 +204,33 @@ class ARIMAModel:
             raise ValueError("模型尚未拟合，请先调用fit()方法")
         
         forecast = self.results.get_forecast(steps=steps)
+        conf_int = forecast.conf_int(alpha=alpha)
+        
+        # 获取置信区间（兼容不同版本的statsmodels列名格式）
+        # conf_int通常是两列的DataFrame，第一列是下界，第二列是上界
+        # 列名可能是：['lower 0.95', 'upper 0.95'] 或 [0, 1] 或其他格式
+        try:
+            # 尝试直接使用列名（如果格式是 'lower 0.95' 和 'upper 0.95'）
+            conf_level = 1 - alpha
+            lower_col = f'lower {conf_level:.2f}'
+            upper_col = f'upper {conf_level:.2f}'
+            
+            if lower_col in conf_int.columns and upper_col in conf_int.columns:
+                lower = conf_int[lower_col]
+                upper = conf_int[upper_col]
+            else:
+                # 如果列名格式不同，使用第一列和第二列
+                lower = conf_int.iloc[:, 0]
+                upper = conf_int.iloc[:, 1]
+        except Exception:
+            # 如果出错，使用第一列和第二列
+            lower = conf_int.iloc[:, 0]
+            upper = conf_int.iloc[:, 1]
+        
         forecast_df = pd.DataFrame({
             'forecast': forecast.predicted_mean,
-            'lower': forecast.conf_int()[f'lower {1-alpha}'],
-            'upper': forecast.conf_int()[f'upper {1-alpha}']
+            'lower': lower,
+            'upper': upper
         })
         
         return forecast_df
