@@ -554,33 +554,34 @@ def page_warning_center(df):
                 arima.fit(series, auto_select=False, order=(1, 1, 1))
                 st.success("✅ 使用默认参数：ARIMA(1,1,1)")
 
-            # 预测
+        # 预测（两种模式都需要执行）
+        with st.spinner("正在生成预测..."):
             forecast_df = arima.predict(steps=steps, alpha=0.05)
 
-            st.markdown("#### 📊 预测曲线（含95%置信区间）")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=series.index, y=series.values, mode="lines", name="历史 PM2.5"
-            ))
-            fig.add_trace(go.Scatter(
-                x=forecast_df.index, y=forecast_df["forecast"],
-                mode="lines+markers", name="预测"
-            ))
-            fig.add_trace(go.Scatter(
-                x=forecast_df.index, y=forecast_df["upper"],
-                mode="lines", name="上界", line=dict(width=0),
-                showlegend=False
-            ))
-            fig.add_trace(go.Scatter(
-                x=forecast_df.index, y=forecast_df["lower"],
-                mode="lines", name="下界", fill="tonexty",
-                line=dict(width=0), showlegend=False
-            ))
-            fig.update_layout(height=350, margin=dict(t=20,b=0,l=0,r=0))
-            st.plotly_chart(fig, use_container_width=True)
+        st.markdown("#### 📊 预测曲线（含95%置信区间）")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=series.index, y=series.values, mode="lines", name="历史 PM2.5"
+        ))
+        fig.add_trace(go.Scatter(
+            x=forecast_df.index, y=forecast_df["forecast"],
+            mode="lines+markers", name="预测"
+        ))
+        fig.add_trace(go.Scatter(
+            x=forecast_df.index, y=forecast_df["upper"],
+            mode="lines", name="上界", line=dict(width=0),
+            showlegend=False
+        ))
+        fig.add_trace(go.Scatter(
+            x=forecast_df.index, y=forecast_df["lower"],
+            mode="lines", name="下界", fill="tonexty",
+            line=dict(width=0), showlegend=False
+        ))
+        fig.update_layout(height=350, margin=dict(t=20,b=0,l=0,r=0))
+        st.plotly_chart(fig, use_container_width=True)
 
-            with st.expander("📄 ARIMA 模型摘要"):
-                st.text(arima.get_summary())
+        with st.expander("📄 ARIMA 模型摘要"):
+            st.text(arima.get_summary())
 
 
 def page_model_arena(df):
@@ -678,6 +679,17 @@ def page_model_arena(df):
                     st.markdown("#### 📊 模型性能对比")
                     comparison_df = evaluator.compare_models(models_results, metric_type='regression')
                     st.dataframe(comparison_df.style.highlight_max(axis=0, subset=['R²']).highlight_min(axis=0, subset=['AIC', 'BIC', 'RMSE', 'MAE']), use_container_width=True)
+                    
+                    # 保存评估结果到session_state（供评估中心页面使用）
+                    # 注意：只保存数据和对比表格，不保存模型对象和evaluator
+                    st.session_state['regression_evaluation'] = {
+                        'comparison_df': comparison_df,
+                        'models_results': {k: {
+                            'y_true': np.array(v['y_true']).flatten(),
+                            'y_pred': np.array(v['y_pred']).flatten()
+                        } for k, v in models_results.items()},
+                        'selected_features': selected_X.columns.tolist()
+                    }
                     
                     # 残差分析
                     st.markdown("#### 📈 残差分析")
@@ -812,6 +824,20 @@ def page_classification(df):
                     comparison_df = pd.DataFrame(comparison_data).T
                     st.dataframe(comparison_df.style.highlight_max(axis=0), use_container_width=True)
                     
+                    # 保存评估结果到session_state（供评估中心页面使用）
+                    st.session_state['classification_evaluation'] = {
+                        'comparison_df': comparison_df,
+                        'y_true': np.array(y_true).flatten(),
+                        'y_pred_logistic': np.array(y_pred_logistic).flatten(),
+                        'y_pred_nb': np.array(y_pred_nb).flatten(),
+                        'y_proba_logistic': np.array(y_proba_logistic),
+                        'y_proba_nb': np.array(y_proba_nb),
+                        'eval_logistic': eval_logistic,
+                        'eval_nb': eval_nb,
+                        'eval_hmm': eval_hmm,
+                        'class_names': clf_models.get_class_names()
+                    }
+                    
                     # 混淆矩阵对比
                     col_cm1, col_cm2 = st.columns(2)
                     with col_cm1:
@@ -840,20 +866,232 @@ def page_evaluation_center(df):
     st.markdown("## 📋 评估中心")
     st.info("💡 统一展示所有模型的评估指标和性能对比。")
     
+    # 检查是否有评估结果
+    has_regression = 'regression_evaluation' in st.session_state
+    has_classification = 'classification_evaluation' in st.session_state
+    
+    if not has_regression and not has_classification:
+        st.warning("""
+        **⚠️ 暂无评估结果**
+        
+        请先在其他页面运行模型：
+        - **回归模型**：前往"⚔️ 模型竞技场"页面，选择特征并运行所有模型
+        - **分类模型**：前往"🎯 分类与状态"页面，选择特征并运行分类模型
+        
+        运行后，评估结果将自动显示在这里。
+        """)
+        return
+    
+    # =======================
+    # 1. 回归模型评估
+    # =======================
     st.markdown("### 📊 回归模型评估")
-    st.markdown('请在"模型竞技场"页面运行回归模型后，评估结果将显示在这里。')
     
+    if has_regression:
+        reg_eval = st.session_state['regression_evaluation']
+        comparison_df = reg_eval['comparison_df']
+        models_results = reg_eval['models_results']
+        evaluator = ModelEvaluator()  # 重新创建evaluator
+        
+        # 评估指标对比表
+        st.markdown("#### 📈 模型性能对比表")
+        st.dataframe(
+            comparison_df.style.highlight_max(axis=0, subset=['R²'])
+                          .highlight_min(axis=0, subset=['AIC', 'BIC', 'RMSE', 'MAE']),
+            use_container_width=True
+        )
+        
+        # 模型选择建议
+        st.markdown("#### 💡 模型选择建议")
+        best_r2 = comparison_df['R²'].idxmax()
+        best_aic = comparison_df['AIC'].idxmin() if 'AIC' in comparison_df.columns and comparison_df['AIC'].notna().any() else None
+        
+        col_rec1, col_rec2 = st.columns(2)
+        with col_rec1:
+            st.success(f"**最佳R²模型**：{best_r2} (R² = {comparison_df.loc[best_r2, 'R²']:.4f})")
+        with col_rec2:
+            if best_aic:
+                st.success(f"**最佳AIC模型**：{best_aic} (AIC = {comparison_df.loc[best_aic, 'AIC']:.2f})")
+        
+        # 残差分析汇总
+        st.markdown("#### 📉 残差分析汇总")
+        model_choice = st.selectbox("选择模型查看残差分析", list(models_results.keys()), key='reg_residual_choice')
+        if model_choice:
+            y_true = models_results[model_choice]['y_true']
+            y_pred = models_results[model_choice]['y_pred']
+            
+            col_res1, col_res2 = st.columns([2, 1])
+            with col_res1:
+                fig = evaluator.plot_residuals(y_true, y_pred)
+                st.pyplot(fig)
+            
+            with col_res2:
+                # Durbin-Watson检验
+                residuals = y_true - y_pred
+                dw_result = evaluator.durbin_watson_test(residuals)
+                st.markdown("**Durbin-Watson检验**")
+                st.metric("DW统计量", f"{dw_result['dw_statistic']:.4f}")
+                st.info(f"**{dw_result['interpretation']}**")
+                
+                # 残差统计
+                st.markdown("**残差统计**")
+                st.metric("均值", f"{np.mean(residuals):.4f}")
+                st.metric("标准差", f"{np.std(residuals):.4f}")
+    else:
+        st.info('💡 请前往"⚔️ 模型竞技场"页面运行回归模型后，评估结果将显示在这里。')
+    
+    st.markdown("---")
+    
+    # =======================
+    # 2. 分类模型评估
+    # =======================
     st.markdown("### 🎯 分类模型评估")
-    st.markdown('请在"分类与状态"页面运行分类模型后，评估结果将显示在这里。')
     
-    st.markdown("### 💡 使用说明")
-    st.markdown("""
-    1. **回归模型评估**：前往"模型竞技场"页面，选择特征并运行模型
-    2. **分类模型评估**：前往"分类与状态"页面，选择特征并运行分类模型
-    3. 所有评估指标包括：
-       - 回归：RMSE, MAE, R², AIC, BIC
-       - 分类：Accuracy, Precision, Recall, F1-Score, AUC
-    """)
+    if has_classification:
+        clf_eval = st.session_state['classification_evaluation']
+        comparison_df = clf_eval['comparison_df']
+        evaluator = ModelEvaluator()  # 重新创建evaluator
+        class_names = clf_eval['class_names']
+        
+        # 评估指标对比表
+        st.markdown("#### 📊 模型性能对比表")
+        st.dataframe(
+            comparison_df.style.highlight_max(axis=0),
+            use_container_width=True
+        )
+        
+        # 模型选择建议
+        st.markdown("#### 💡 模型选择建议")
+        best_accuracy = comparison_df['Accuracy'].idxmax()
+        best_f1 = comparison_df['F1-Score (Macro)'].idxmax() if 'F1-Score (Macro)' in comparison_df.columns else None
+        best_auc = comparison_df['AUC'].idxmax() if 'AUC' in comparison_df.columns and comparison_df['AUC'].notna().any() else None
+        
+        col_clf1, col_clf2, col_clf3 = st.columns(3)
+        with col_clf1:
+            st.success(f"**最佳准确率**：{best_accuracy}\n(Accuracy = {comparison_df.loc[best_accuracy, 'Accuracy']:.4f})")
+        with col_clf2:
+            if best_f1:
+                st.success(f"**最佳F1-Score**：{best_f1}\n(F1 = {comparison_df.loc[best_f1, 'F1-Score (Macro)']:.4f})")
+        with col_clf3:
+            if best_auc:
+                st.success(f"**最佳AUC**：{best_auc}\n(AUC = {comparison_df.loc[best_auc, 'AUC']:.4f})")
+        
+        # 混淆矩阵对比
+        st.markdown("#### 🎯 混淆矩阵对比")
+        col_cm1, col_cm2, col_cm3 = st.columns(3)
+        
+        with col_cm1:
+            st.markdown("**Logistic Regression**")
+            fig, ax = evaluator.plot_confusion_matrix(
+                clf_eval['y_true'],
+                clf_eval['y_pred_logistic'],
+                class_names
+            )
+            st.pyplot(fig)
+        
+        with col_cm2:
+            st.markdown("**Naive Bayes**")
+            fig, ax = evaluator.plot_confusion_matrix(
+                clf_eval['y_true'],
+                clf_eval['y_pred_nb'],
+                class_names
+            )
+            st.pyplot(fig)
+        
+        with col_cm3:
+            if 'eval_hmm' in clf_eval and clf_eval['eval_hmm'] is not None:
+                st.markdown("**HMM**")
+                # HMM的混淆矩阵（如果有的话）
+                st.info("HMM混淆矩阵需在分类与状态页面查看")
+            else:
+                st.info("HMM结果未可用")
+        
+        # ROC曲线对比
+        st.markdown("#### 📈 ROC曲线对比")
+        try:
+            # 绘制多个模型的ROC曲线
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # Logistic Regression
+            from sklearn.metrics import roc_curve, roc_auc_score
+            y_true = clf_eval['y_true']
+            y_proba_log = clf_eval['y_proba_logistic']
+            
+            # 多分类ROC（使用one-vs-rest）
+            n_classes = len(class_names)
+            if n_classes == 2:
+                fpr, tpr, _ = roc_curve(y_true, y_proba_log[:, 1])
+                auc = roc_auc_score(y_true, y_proba_log[:, 1])
+                ax.plot(fpr, tpr, label=f'Logistic Regression (AUC = {auc:.3f})')
+            else:
+                for i in range(n_classes):
+                    y_binary = (y_true == i).astype(int)
+                    if len(np.unique(y_binary)) > 1:
+                        fpr, tpr, _ = roc_curve(y_binary, y_proba_log[:, i])
+                        auc = roc_auc_score(y_binary, y_proba_log[:, i])
+                        ax.plot(fpr, tpr, label=f'{class_names[i]} (AUC = {auc:.3f})')
+            
+            # Naive Bayes
+            y_proba_nb = clf_eval['y_proba_nb']
+            if n_classes == 2:
+                fpr, tpr, _ = roc_curve(y_true, y_proba_nb[:, 1])
+                auc = roc_auc_score(y_true, y_proba_nb[:, 1])
+                ax.plot(fpr, tpr, linestyle='--', label=f'Naive Bayes (AUC = {auc:.3f})')
+            else:
+                for i in range(n_classes):
+                    y_binary = (y_true == i).astype(int)
+                    if len(np.unique(y_binary)) > 1:
+                        fpr, tpr, _ = roc_curve(y_binary, y_proba_nb[:, i])
+                        auc = roc_auc_score(y_binary, y_proba_nb[:, i])
+                        ax.plot(fpr, tpr, linestyle='--', label=f'{class_names[i]} (NB, AUC = {auc:.3f})')
+            
+            ax.plot([0, 1], [0, 1], 'k--', label='随机猜测')
+            ax.set_xlabel('假正率 (FPR)')
+            ax.set_ylabel('真正率 (TPR)')
+            ax.set_title('ROC曲线对比')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
+        except Exception as e:
+            st.warning(f"ROC曲线绘制失败: {str(e)}")
+            # 使用evaluator的方法
+            try:
+                fig, ax = evaluator.plot_roc_curve(y_true, y_proba_log, class_names)
+                st.pyplot(fig)
+            except:
+                pass
+    
+    else:
+        st.info('💡 请前往"🎯 分类与状态"页面运行分类模型后，评估结果将显示在这里。')
+    
+    st.markdown("---")
+    
+    # =======================
+    # 3. 综合总结
+    # =======================
+    st.markdown("### 📋 综合评估总结")
+    
+    if has_regression and has_classification:
+        st.success("""
+        **✅ 所有模型评估完成**
+        
+        **回归模型建议**：
+        - 根据R²、AIC/BIC指标选择最佳回归模型
+        - 关注残差分析，确保模型假设满足
+        
+        **分类模型建议**：
+        - 根据Accuracy、F1-Score、AUC选择最佳分类模型
+        - 关注混淆矩阵，分析各类别的分类性能
+        
+        **模型选择原则**：
+        1. 回归模型：优先考虑R²高、AIC/BIC低的模型
+        2. 分类模型：优先考虑Accuracy和F1-Score高的模型
+        3. 综合考虑：结合实际应用场景和模型复杂度
+        """)
+    elif has_regression:
+        st.info("回归模型评估已完成，请运行分类模型以获得完整评估。")
+    elif has_classification:
+        st.info("分类模型评估已完成，请运行回归模型以获得完整评估。")
 
 
 # ==========================================
@@ -1043,9 +1281,53 @@ def main():
             
             st.markdown("---")
             st.markdown("### 🧹 预处理设置")
-            missing_method = st.selectbox("缺失值处理", ["interpolation", "drop"], index=0)
-            outlier_method = st.selectbox("异常值处理", ["3sigma", "iqr", "none"], index=0)
-            do_log = st.checkbox("对 PM2.5 做 Log 变换（用于检验/建模对比）", value=False)    
+            st.caption("💡 修改设置后会自动重新处理数据")
+            
+            # 初始化预处理设置（如果不存在）
+            if 'preprocessing_settings' not in st.session_state:
+                st.session_state['preprocessing_settings'] = {
+                    'missing_method': 'interpolation',
+                    'outlier_method': '3sigma',
+                    'do_log': False
+                }
+            
+            # 预处理设置选择
+            missing_method = st.selectbox(
+                "缺失值处理",
+                ["interpolation", "drop"],
+                index=0 if st.session_state['preprocessing_settings']['missing_method'] == 'interpolation' else 1,
+                help="interpolation: 线性插值填补缺失值 | drop: 删除包含缺失值的行"
+            )
+            outlier_method = st.selectbox(
+                "异常值处理",
+                ["3sigma", "iqr", "none"],
+                index=["3sigma", "iqr", "none"].index(st.session_state['preprocessing_settings']['outlier_method']),
+                help="3sigma: 3倍标准差原则 | iqr: 四分位距方法 | none: 不处理异常值"
+            )
+            do_log = st.checkbox(
+                "对 PM2.5 做 Log 变换（用于检验/建模对比）",
+                value=st.session_state['preprocessing_settings']['do_log'],
+                help="对PM2.5进行对数变换，使其更接近正态分布"
+            )
+            
+            # 检查设置是否改变
+            settings_changed = (
+                missing_method != st.session_state['preprocessing_settings']['missing_method'] or
+                outlier_method != st.session_state['preprocessing_settings']['outlier_method'] or
+                do_log != st.session_state['preprocessing_settings']['do_log']
+            )
+            
+            if settings_changed:
+                # 更新设置
+                st.session_state['preprocessing_settings'] = {
+                    'missing_method': missing_method,
+                    'outlier_method': outlier_method,
+                    'do_log': do_log
+                }
+                # 清除已处理的数据缓存，强制重新处理
+                if 'processed_data' in st.session_state:
+                    del st.session_state['processed_data']
+                st.rerun()
             
             st.markdown("---")
             st.markdown("### 🧪 或使用测试数据")
@@ -1083,6 +1365,21 @@ def main():
     # 主逻辑路由
     if 'data' in st.session_state:
         df = st.session_state['data'].copy()
+        
+        # 从session_state获取预处理设置
+        if 'preprocessing_settings' not in st.session_state:
+            # 如果设置不存在，使用默认值
+            preprocessing_settings = {
+                'missing_method': 'interpolation',
+                'outlier_method': '3sigma',
+                'do_log': False
+            }
+        else:
+            preprocessing_settings = st.session_state['preprocessing_settings']
+        
+        missing_method = preprocessing_settings['missing_method']
+        outlier_method = preprocessing_settings['outlier_method']
+        do_log = preprocessing_settings['do_log']
         
         if 'processed_data' not in st.session_state:
             with st.spinner("正在进行智能清洗与预处理..."):
