@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import statsmodels.api as sm
 import sys
 import os
+from sklearn.model_selection import train_test_split
 
 # 尝试导入美化菜单库，如果没有安装则降级处理
 try:
@@ -31,8 +32,6 @@ try:
     from data_preprocessing import DataPreprocessor
     from statistical_inference import StatisticalInference
     from glm_model import GLMModel
-    from arima_model import ARIMAModel
-    from hmm_model import HMMModel
     # 新增模块
     from classification_models import ClassificationModels
     from model_evaluation import ModelEvaluator
@@ -133,13 +132,6 @@ st.markdown("""
 # ==========================================
 # 2. 核心逻辑函数 (逻辑保持不变)
 # ==========================================
-
-def get_hmm_features(df):
-    # 你这份 UCI 数据的典型气象列
-    candidate = ["DEWP", "TEMP", "PRES", "Iws", "Is", "Ir"]
-    feats = [c for c in candidate if c in df.columns]
-    return feats
-
 
 def normalize_column_names(df):
     df = df.copy()
@@ -432,162 +424,11 @@ def page_attribution_analysis(df):
             </div>
             """, unsafe_allow_html=True)
 
-def page_warning_center(df):
-    st.markdown("## ⚠️ 智能预警中心")
-
-    if not isinstance(df.index, pd.DatetimeIndex):
-        st.error("当前数据没有时间索引，无法进行 HMM/ARIMA 预警。")
-        return
-
-    # =======================
-    # 1) HMM 状态识别
-    # =======================
-    st.markdown("### 🎲 状态识别 (HMM)")
-    feats = get_hmm_features(df)
-
-    if len(feats) == 0:
-        st.warning("未找到气象特征列（DEWP/TEMP/PRES/Iws/Is/Ir），无法拟合 HMM。")
-    else:
-        col1, col2 = st.columns([1, 2])
-
-        with col1:
-            n_states = st.slider("隐状态数量", 2, 5, 3)
-            hmm_mode = st.radio("状态定义方式", ["阈值（国标）", "分位数"], index=0)
-
-            run_hmm = st.button("🚀 拟合 HMM 并推断当前状态", use_container_width=True)
-
-        with col2:
-            st.markdown("**HMM 观测特征：** " + ", ".join(feats))
-
-        if run_hmm:
-            with st.spinner("HMM 训练中..."):
-                obs = df[feats].dropna()
-                pm25 = df.loc[obs.index, "PM2.5"].dropna()
-                obs = obs.loc[pm25.index]
-
-                hmm_model = HMMModel(n_states=n_states)
-
-                # 用 PM2.5 来定义 state 的阈值/分位数（在模型里）
-                hmm_model.fit(obs.values, pm25_values=pm25.values)
-
-                # 推断全序列状态
-                states = hmm_model.predict_states(obs.values)
-
-                # ✅ 对齐状态含义：按每个 state 的 PM2.5 均值排序
-                state_means = {}
-                for s in range(n_states):
-                    state_means[s] = pm25.values[states == s].mean()
-
-                sorted_states = sorted(state_means, key=state_means.get)
-                mapped_names = []
-                if n_states == 3 and hmm_mode.startswith("阈值"):
-                    mapped_names = ["优良", "轻度污染", "重度污染"]
-                else:
-                    mapped_names = [f"状态{i+1}" for i in range(n_states)]
-
-                mapping = {s: mapped_names[i] for i, s in enumerate(sorted_states)}
-                current_state = mapping[states[-1]]
-
-                st.success(f"当前隐状态：**{current_state}**")
-                mean_df = pd.DataFrame({
-                    "state": list(state_means.keys()),
-                    "PM2.5_mean": list(state_means.values())
-                }).sort_values("PM2.5_mean")
-                st.markdown("**各状态 PM2.5 均值（用于解释对齐）：**")
-                st.dataframe(mean_df, use_container_width=True)
-
-                st.markdown("#### 🔁 状态转移矩阵")
-                trans = hmm_model.get_transition_matrix().copy()
-                # 重新按 mapping 排序/重命名
-                trans.index = [mapping.get(i, i) for i in trans.index]
-                trans.columns = [mapping.get(i, i) for i in trans.columns]
-                st.dataframe(trans, use_container_width=True)
-
-                st.markdown("#### 📌 最近 7 天隐状态序列")
-                last_idx = obs.index[-24*7:] if len(obs) >= 24*7 else obs.index
-                last_states = states[-len(last_idx):]
-                state_series = pd.Series([mapping[s] for s in last_states], index=last_idx)
-
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=state_series.index, y=state_series.values, mode="lines"))
-                fig.update_layout(height=250, margin=dict(t=20,b=0,l=0,r=0))
-                st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("---")
-
-    # =======================
-    # 2) ARIMA 短期预测
-    # =======================
-    st.markdown("### 🔮 趋势预测 (ARIMA)")
-
-    col_arima1, col_arima2 = st.columns([2, 1])
-    with col_arima1:
-        steps = st.slider("预测未来小时数", 12, 72, 24)
-    with col_arima2:
-        use_auto_select = st.checkbox("自动选择参数（较慢）", value=False, help="取消勾选将使用默认参数(1,1,1)，速度更快")
-    
-    run_arima = st.button("📈 生成 ARIMA 预测", type="primary", use_container_width=True)
-
-    if run_arima:
-        series = df["PM2.5"].dropna()
-        
-        # 如果数据量太大，提示降采样
-        if len(series) > 10000:
-            st.info(f"💡 数据量较大（{len(series)}条），为加快速度将自动降采样")
-            # 降采样到最近10000条
-            series = series.iloc[-10000:]
-        
-        arima = ARIMAModel()
-
-        # 平稳性检验
-        with st.spinner("正在进行平稳性检验..."):
-            stat_res = arima.check_stationarity(series)
-            st.write("ADF 检验结果：", stat_res)
-
-        # 拟合
-        if use_auto_select:
-            with st.spinner("正在自动选择ARIMA参数（这可能需要1-2分钟，请耐心等待）..."):
-                arima.fit(series, auto_select=True)
-                st.success(f"✅ 自动选择参数：ARIMA{arima.order}")
-        else:
-            with st.spinner("正在拟合ARIMA模型（使用默认参数(1,1,1)）..."):
-                arima.fit(series, auto_select=False, order=(1, 1, 1))
-                st.success("✅ 使用默认参数：ARIMA(1,1,1)")
-
-        # 预测（两种模式都需要执行）
-        with st.spinner("正在生成预测..."):
-            forecast_df = arima.predict(steps=steps, alpha=0.05)
-
-        st.markdown("#### 📊 预测曲线（含95%置信区间）")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=series.index, y=series.values, mode="lines", name="历史 PM2.5"
-        ))
-        fig.add_trace(go.Scatter(
-            x=forecast_df.index, y=forecast_df["forecast"],
-            mode="lines+markers", name="预测"
-        ))
-        fig.add_trace(go.Scatter(
-            x=forecast_df.index, y=forecast_df["upper"],
-            mode="lines", name="上界", line=dict(width=0),
-            showlegend=False
-        ))
-        fig.add_trace(go.Scatter(
-            x=forecast_df.index, y=forecast_df["lower"],
-            mode="lines", name="下界", fill="tonexty",
-            line=dict(width=0), showlegend=False
-        ))
-        fig.update_layout(height=350, margin=dict(t=20,b=0,l=0,r=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-        with st.expander("📄 ARIMA 模型摘要"):
-            st.text(arima.get_summary())
-
 
 def page_model_arena(df):
     """模型竞技场页面 - 回归模型对比"""
     st.markdown("## ⚔️ 模型竞技场")
-    st.info("💡 对比不同回归模型的性能，展示模型选择过程。")
+    st.info("💡 对比不同回归模型的性能，展示模型选择过程。使用 Train/Test 分割确保评估结果的可靠性。")
     
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     features = [c for c in numeric_cols if c not in ['PM2.5', 'No', 'year', 'month', 'day', 'hour']]
@@ -601,6 +442,12 @@ def page_model_arena(df):
     with col1:
         st.markdown("#### ⚙️ 参数配置")
         selected_features = st.multiselect("选择特征变量", features, default=features[:4] if len(features) >= 4 else features)
+        
+        # 添加数据分割选项
+        st.markdown("#### 📊 数据分割设置")
+        test_size = st.slider("测试集比例", 0.1, 0.4, 0.2, 0.05, help="用于评估模型泛化能力的数据比例")
+        random_state = st.number_input("随机种子", 0, 100, 42, help="确保结果可复现")
+        
         use_lasso_selection = st.checkbox("使用Lasso进行特征筛选", value=False)
         run_models = st.button("🚀 运行所有模型", type="primary", use_container_width=True)
     
@@ -612,116 +459,166 @@ def page_model_arena(df):
                     y = df.loc[X_raw.index, 'PM2.5'].dropna()
                     X_raw = X_raw.loc[y.index]
                     
-                    # 特征选择
-                    selected_X = X_raw
+                    # ✅ 数据分割：Train/Test Split
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X_raw, y, test_size=test_size, random_state=random_state
+                    )
+                    
+                    st.success(f"✅ 数据分割完成：训练集 {len(X_train)} 条 ({100-test_size*100:.0f}%) | 测试集 {len(X_test)} 条 ({test_size*100:.0f}%)")
+                    
+                    # 特征选择（基于训练集）
+                    selected_X_train = X_train
+                    selected_X_test = X_test
                     if use_lasso_selection:
                         selector = FeatureSelector()
-                        result = selector.lasso_selection(X_raw, y)
-                        selected_X = X_raw[result['selected_features']]
+                        result = selector.lasso_selection(X_train, y_train)
+                        selected_X_train = X_train[result['selected_features']]
+                        selected_X_test = X_test[result['selected_features']]
                         st.success(f"Lasso筛选出 {result['n_selected']}/{result['n_total']} 个重要特征")
                         
                         fig, ax = selector.plot_feature_importance(top_n=min(10, len(selected_features)))
                         st.pyplot(fig)
                     
-                    # 拟合多个模型
+                    # 拟合多个模型（使用训练集训练，测试集评估）
                     reg_models = RegressionModels()
                     evaluator = ModelEvaluator()
                     
                     models_results = {}
                     
-                    # OLS
-                    ols_model = reg_models.fit_ols(selected_X, y)
-                    y_pred_ols = ols_model.predict(sm.add_constant(selected_X))
+                    # OLS - 训练集训练，测试集预测
+                    ols_model = reg_models.fit_ols(selected_X_train, y_train)
+                    X_test_const = sm.add_constant(selected_X_test)
+                    # 确保测试集有相同的列
+                    if 'const' not in X_test_const.columns:
+                        X_test_const = sm.add_constant(selected_X_test, has_constant='add')
+                    y_pred_ols = ols_model.predict(X_test_const)
                     models_results['OLS'] = {
-                        'y_true': y,
+                        'y_true': y_test,
                         'y_pred': y_pred_ols,
                         'model': ols_model
                     }
                     
-                    # Ridge
-                    ridge_model = reg_models.fit_ridge(selected_X, y, cv=True)
-                    y_pred_ridge = ridge_model.predict(reg_models.scaler.transform(selected_X.values))
+                    # Ridge - 训练集训练，测试集预测
+                    ridge_model = reg_models.fit_ridge(selected_X_train, y_train, cv=True)
+                    y_pred_ridge = ridge_model.predict(reg_models.scaler.transform(selected_X_test.values))
                     models_results['Ridge'] = {
-                        'y_true': y,
+                        'y_true': y_test,
                         'y_pred': y_pred_ridge,
                         'model': ridge_model
                     }
                     
-                    # Lasso
-                    lasso_model = reg_models.fit_lasso(selected_X, y, cv=True)
-                    y_pred_lasso = lasso_model.predict(reg_models.scaler.transform(selected_X.values))
+                    # Lasso - 训练集训练，测试集预测
+                    lasso_model = reg_models.fit_lasso(selected_X_train, y_train, cv=True)
+                    y_pred_lasso = lasso_model.predict(reg_models.scaler.transform(selected_X_test.values))
                     models_results['Lasso'] = {
-                        'y_true': y,
+                        'y_true': y_test,
                         'y_pred': y_pred_lasso,
                         'model': lasso_model
                     }
                     
-                    # GLM
-                    glm_model = reg_models.fit_glm(selected_X, y)
-                    y_pred_glm = glm_model.predict(selected_X)
+                    # GLM - 训练集训练，测试集预测
+                    glm_model = reg_models.fit_glm(selected_X_train, y_train)
+                    y_pred_glm = glm_model.predict(selected_X_test)
                     models_results['GLM'] = {
-                        'y_true': y,
+                        'y_true': y_test,
                         'y_pred': y_pred_glm,
                         'model': glm_model.results
                     }
                     
-                    # Bayesian Ridge
+                    # Bayesian Ridge - 训练集训练，测试集预测
                     bayesian = BayesianModels()
-                    bayesian.fit_bayesian_regression(selected_X, y)
-                    y_pred_bayesian, y_std = bayesian.predict_bayesian_regression(selected_X)
+                    bayesian.fit_bayesian_regression(selected_X_train, y_train)
+                    y_pred_bayesian, y_std = bayesian.predict_bayesian_regression(selected_X_test)
                     models_results['Bayesian Ridge'] = {
-                        'y_true': y,
+                        'y_true': y_test,
                         'y_pred': y_pred_bayesian,
                         'model': bayesian.bayesian_ridge_model
                     }
                     
-                    # 模型对比
-                    st.markdown("#### 📊 模型性能对比")
+                    # 模型对比（基于测试集的评估结果）
+                    st.markdown("#### 📊 模型性能对比（测试集评估）")
+                    st.caption("💡 以下指标基于模型未见过的测试集计算，反映真实泛化能力")
                     comparison_df = evaluator.compare_models(models_results, metric_type='regression')
                     st.dataframe(comparison_df.style.highlight_max(axis=0, subset=['R²']).highlight_min(axis=0, subset=['AIC', 'BIC', 'RMSE', 'MAE']), use_container_width=True)
                     
-                    # 保存评估结果到session_state（供评估中心页面使用）
-                    # 注意：只保存数据和对比表格，不保存模型对象和evaluator
+                    # 保存评估结果到session_state（供评估中心页面使用和残差分析）
                     st.session_state['regression_evaluation'] = {
                         'comparison_df': comparison_df,
                         'models_results': {k: {
                             'y_true': np.array(v['y_true']).flatten(),
                             'y_pred': np.array(v['y_pred']).flatten()
                         } for k, v in models_results.items()},
-                        'selected_features': selected_X.columns.tolist()
+                        'selected_features': selected_X_train.columns.tolist(),
+                        'test_size': test_size,
+                        'train_size': len(X_train),
+                        'test_size_n': len(X_test)
                     }
                     
-                    # 残差分析
-                    st.markdown("#### 📈 残差分析")
-                    model_choice = st.selectbox("选择模型查看残差", list(models_results.keys()))
-                    if model_choice:
-                        fig = evaluator.plot_residuals(
-                            models_results[model_choice]['y_true'],
-                            models_results[model_choice]['y_pred']
-                        )
-                        st.pyplot(fig)
-                        
-                        # Durbin-Watson检验
-                        dw_result = evaluator.durbin_watson_test(
-                            models_results[model_choice]['y_true'] - models_results[model_choice]['y_pred']
-                        )
-                        st.info(f"Durbin-Watson统计量: {dw_result['dw_statistic']:.4f} - {dw_result['interpretation']}")
-                    
-                    # 贝叶斯后验分布
-                    st.markdown("#### 🎲 贝叶斯方法：参数后验分布")
-                    fig, ax = bayesian.plot_posterior(feature_names=selected_X.columns.tolist())
-                    st.pyplot(fig)
+                    # 保存贝叶斯模型结果
+                    st.session_state['bayesian_model'] = {
+                        'feature_names': selected_X_train.columns.tolist(),
+                        'coef': bayesian.bayesian_ridge_model.coef_,
+                        'alpha': bayesian.bayesian_ridge_model.alpha_,
+                        'lambda': bayesian.bayesian_ridge_model.lambda_
+                    }
                     
                 except Exception as e:
                     st.error(f"模型拟合失败: {str(e)}")
                     import traceback
                     st.code(traceback.format_exc())
+        
+        # 残差分析和贝叶斯后验（从session_state读取，避免页面刷新丢失）
+        if 'regression_evaluation' in st.session_state:
+            reg_eval = st.session_state['regression_evaluation']
+            models_results = reg_eval['models_results']
+            evaluator = ModelEvaluator()
+            
+            # 残差分析
+            st.markdown("#### 📈 残差分析")
+            model_choice = st.selectbox("选择模型查看残差", list(models_results.keys()), key="regression_model_choice")
+            if model_choice:
+                fig = evaluator.plot_residuals(
+                    models_results[model_choice]['y_true'],
+                    models_results[model_choice]['y_pred']
+                )
+                st.pyplot(fig)
+                
+                # Durbin-Watson检验
+                dw_result = evaluator.durbin_watson_test(
+                    models_results[model_choice]['y_true'] - models_results[model_choice]['y_pred']
+                )
+                st.info(f"Durbin-Watson统计量: {dw_result['dw_statistic']:.4f} - {dw_result['interpretation']}")
+            
+            # 贝叶斯后验分布
+            if 'bayesian_model' in st.session_state:
+                st.markdown("#### 🎲 贝叶斯方法：参数后验分布")
+                bayesian_info = st.session_state['bayesian_model']
+                
+                # 绘制系数条形图
+                fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+                
+                feature_names = bayesian_info['feature_names']
+                coef = bayesian_info['coef']
+                
+                # 系数均值
+                axes[0].barh(feature_names, coef, color='steelblue')
+                axes[0].axvline(x=0, color='black', linestyle='--', linewidth=0.8)
+                axes[0].set_xlabel('系数值')
+                axes[0].set_title('系数后验均值')
+                
+                # 系数绝对值（重要性）
+                axes[1].barh(feature_names, np.abs(coef), color='orange')
+                axes[1].set_xlabel('|系数|')
+                axes[1].set_title('特征重要性（系数绝对值）')
+                
+                plt.tight_layout()
+                st.pyplot(fig)
 
 
 def page_classification(df):
     """分类与状态页面 - 分类模型对比"""
     st.markdown("## 🎯 分类与状态")
-    st.info("💡 对比Logistic Regression、Naive Bayes和HMM的分类性能。")
+    st.info("💡 对比Logistic Regression和Naive Bayes的分类性能。使用 Train/Test 分割确保评估结果的可靠性。")
     
     if 'PM2.5' not in df.columns:
         st.error("数据中未找到PM2.5列")
@@ -738,7 +635,13 @@ def page_classification(df):
     
     with col1:
         st.markdown("#### ⚙️ 参数配置")
-        selected_features = st.multiselect("选择特征变量", features, default=features[:4] if len(features) >= 4 else features)
+        selected_features = st.multiselect("选择特征变量", features, default=features[:4] if len(features) >= 4 else features, key="clf_features")
+        
+        # 添加数据分割选项
+        st.markdown("#### 📊 数据分割设置")
+        clf_test_size = st.slider("测试集比例", 0.1, 0.4, 0.2, 0.05, key="clf_test_size", help="用于评估模型泛化能力的数据比例")
+        clf_random_state = st.number_input("随机种子", 0, 100, 42, key="clf_random_state", help="确保结果可复现")
+        
         run_classification = st.button("🚀 运行分类模型", type="primary", use_container_width=True)
     
     with col2:
@@ -753,48 +656,33 @@ def page_classification(df):
                     clf_models = ClassificationModels()
                     evaluator = ModelEvaluator()
                     
-                    # Logistic Regression
-                    clf_models.fit_logistic(X, pm25_values=y_pm25.values)
-                    y_pred_logistic = clf_models.predict_logistic(X)
-                    y_proba_logistic = clf_models.predict_proba_logistic(X)
+                    # 转换为分类标签
+                    y_category = clf_models._pm25_to_category(y_pm25.values)
                     
-                    # Naive Bayes
-                    clf_models.fit_naive_bayes(X, pm25_values=y_pm25.values)
-                    y_pred_nb = clf_models.predict_naive_bayes(X)
-                    y_proba_nb = clf_models.predict_proba_naive_bayes(X)
+                    # ✅ 数据分割：Train/Test Split
+                    X_train, X_test, y_train, y_test, pm25_train, pm25_test = train_test_split(
+                        X, y_category, y_pm25, test_size=clf_test_size, random_state=clf_random_state, stratify=y_category
+                    )
                     
-                    # 转换为分类标签（用于评估）
-                    y_true = clf_models._pm25_to_category(y_pm25.values)
+                    st.success(f"✅ 数据分割完成：训练集 {len(X_train)} 条 ({100-clf_test_size*100:.0f}%) | 测试集 {len(X_test)} 条 ({clf_test_size*100:.0f}%)")
                     
-                    # 评估
-                    eval_logistic = clf_models.evaluate(y_true, y_pred_logistic, y_proba_logistic, "Logistic Regression")
-                    eval_nb = clf_models.evaluate(y_true, y_pred_nb, y_proba_nb, "Naive Bayes")
+                    # Logistic Regression - 训练集训练，测试集评估
+                    clf_models.fit_logistic(X_train, y=y_train)
+                    y_pred_logistic = clf_models.predict_logistic(X_test)
+                    y_proba_logistic = clf_models.predict_proba_logistic(X_test)
                     
-                    # HMM（使用现有HMM模块）
-                    hmm_feats = get_hmm_features(df)
-                    if len(hmm_feats) > 0:
-                        hmm_obs = df[hmm_feats].loc[X.index].dropna()
-                        hmm_pm25 = y_pm25.loc[hmm_obs.index]
-                        hmm_obs = hmm_obs.loc[hmm_pm25.index]
-                        
-                        hmm_model = HMMModel(n_states=3)
-                        hmm_model.fit(hmm_obs.values, pm25_values=hmm_pm25.values)
-                        hmm_states = hmm_model.predict_states(hmm_obs.values)
-                        
-                        # 对齐HMM状态和分类标签
-                        state_means = {}
-                        for s in range(3):
-                            state_means[s] = hmm_pm25.values[hmm_states == s].mean() if np.sum(hmm_states == s) > 0 else 0
-                        sorted_states = sorted(state_means, key=state_means.get)
-                        state_mapping = {sorted_states[i]: i for i in range(3)}
-                        hmm_labels = np.array([state_mapping[s] for s in hmm_states])
-                        y_true_hmm = clf_models._pm25_to_category(hmm_pm25.values)
-                        eval_hmm = evaluator.classification_metrics(y_true_hmm, hmm_labels)
-                    else:
-                        eval_hmm = None
+                    # Naive Bayes - 训练集训练，测试集评估
+                    clf_models.fit_naive_bayes(X_train, y=y_train)
+                    y_pred_nb = clf_models.predict_naive_bayes(X_test)
+                    y_proba_nb = clf_models.predict_proba_naive_bayes(X_test)
+                    
+                    # 评估（基于测试集）
+                    eval_logistic = clf_models.evaluate(y_test, y_pred_logistic, y_proba_logistic, "Logistic Regression")
+                    eval_nb = clf_models.evaluate(y_test, y_pred_nb, y_proba_nb, "Naive Bayes")
                     
                     # 展示结果
-                    st.markdown("#### 📊 分类模型性能对比")
+                    st.markdown("#### 📊 分类模型性能对比（测试集评估）")
+                    st.caption("💡 以下指标基于模型未见过的测试集计算，反映真实泛化能力")
                     comparison_data = {
                         'Logistic Regression': {
                             'Accuracy': eval_logistic['accuracy'],
@@ -812,47 +700,40 @@ def page_classification(df):
                         }
                     }
                     
-                    if eval_hmm:
-                        comparison_data['HMM'] = {
-                            'Accuracy': eval_hmm['accuracy'],
-                            'Precision (Macro)': eval_hmm['precision_macro'],
-                            'Recall (Macro)': eval_hmm['recall_macro'],
-                            'F1-Score (Macro)': eval_hmm['f1_macro'],
-                            'AUC': eval_hmm['auc_score']
-                        }
-                    
                     comparison_df = pd.DataFrame(comparison_data).T
                     st.dataframe(comparison_df.style.highlight_max(axis=0), use_container_width=True)
                     
                     # 保存评估结果到session_state（供评估中心页面使用）
                     st.session_state['classification_evaluation'] = {
                         'comparison_df': comparison_df,
-                        'y_true': np.array(y_true).flatten(),
+                        'y_true': np.array(y_test).flatten(),
                         'y_pred_logistic': np.array(y_pred_logistic).flatten(),
                         'y_pred_nb': np.array(y_pred_nb).flatten(),
                         'y_proba_logistic': np.array(y_proba_logistic),
                         'y_proba_nb': np.array(y_proba_nb),
                         'eval_logistic': eval_logistic,
                         'eval_nb': eval_nb,
-                        'eval_hmm': eval_hmm,
-                        'class_names': clf_models.get_class_names()
+                        'class_names': clf_models.get_class_names(),
+                        'test_size': clf_test_size,
+                        'train_size': len(X_train),
+                        'test_size_n': len(X_test)
                     }
                     
                     # 混淆矩阵对比
                     col_cm1, col_cm2 = st.columns(2)
                     with col_cm1:
                         st.markdown("**Logistic Regression 混淆矩阵**")
-                        fig, ax = evaluator.plot_confusion_matrix(y_true, y_pred_logistic, clf_models.get_class_names())
+                        fig, ax = evaluator.plot_confusion_matrix(y_test, y_pred_logistic, clf_models.get_class_names())
                         st.pyplot(fig)
                     
                     with col_cm2:
                         st.markdown("**Naive Bayes 混淆矩阵**")
-                        fig, ax = evaluator.plot_confusion_matrix(y_true, y_pred_nb, clf_models.get_class_names())
+                        fig, ax = evaluator.plot_confusion_matrix(y_test, y_pred_nb, clf_models.get_class_names())
                         st.pyplot(fig)
                     
                     # ROC曲线对比
                     st.markdown("#### 📈 ROC曲线对比")
-                    fig, ax = evaluator.plot_roc_curve(y_true, y_proba_logistic, clf_models.get_class_names())
+                    fig, ax = evaluator.plot_roc_curve(y_test, y_proba_logistic, clf_models.get_class_names())
                     st.pyplot(fig)
                     
                 except Exception as e:
@@ -978,7 +859,7 @@ def page_evaluation_center(df):
         
         # 混淆矩阵对比
         st.markdown("#### 🎯 混淆矩阵对比")
-        col_cm1, col_cm2, col_cm3 = st.columns(3)
+        col_cm1, col_cm2 = st.columns(2)
         
         with col_cm1:
             st.markdown("**Logistic Regression**")
@@ -997,14 +878,6 @@ def page_evaluation_center(df):
                 class_names
             )
             st.pyplot(fig)
-        
-        with col_cm3:
-            if 'eval_hmm' in clf_eval and clf_eval['eval_hmm'] is not None:
-                st.markdown("**HMM**")
-                # HMM的混淆矩阵（如果有的话）
-                st.info("HMM混淆矩阵需在分类与状态页面查看")
-            else:
-                st.info("HMM结果未可用")
         
         # ROC曲线对比
         st.markdown("#### 📈 ROC曲线对比")
@@ -1114,8 +987,8 @@ def main():
         if HAS_OPTION_MENU:
             selected = option_menu(
                 menu_title=None,
-                options=["数据洞察", "归因分析", "⚔️ 模型竞技场", "🎯 分类与状态", "预警中心", "📋 评估中心"],
-                icons=["bar-chart-fill", "search", "trophy", "target", "shield-exclamation", "clipboard-data"],
+                options=["数据洞察", "归因分析", "⚔️ 模型竞技场", "🎯 分类与状态", "📋 评估中心"],
+                icons=["bar-chart-fill", "search", "trophy", "target", "clipboard-data"],
                 menu_icon="cast",
                 default_index=0,
                 styles={
@@ -1126,7 +999,7 @@ def main():
                 }
             )
         else:
-            selected = st.radio("导航", ["数据洞察", "归因分析", "⚔️ 模型竞技场", "🎯 分类与状态", "预警中心", "📋 评估中心"])
+            selected = st.radio("导航", ["数据洞察", "归因分析", "⚔️ 模型竞技场", "🎯 分类与状态", "📋 评估中心"])
         
         st.markdown("---")
         
@@ -1403,8 +1276,6 @@ def main():
             page_model_arena(df_processed)
         elif selected == "🎯 分类与状态" or selected == "分类与状态":
             page_classification(df_processed)
-        elif selected == "预警中心":
-            page_warning_center(df_processed)
         elif selected == "📋 评估中心" or selected == "评估中心":
             page_evaluation_center(df_processed)
             
