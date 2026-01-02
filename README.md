@@ -1,4 +1,4 @@
-# 城市空气质量监测及归因预警系统
+# 城市空气质量监测及归因分析系统
 
 **项目代号**: AirQuality-StatModel-2025  
 **版本**: V3.0 终极增强版  
@@ -6,7 +6,7 @@
 
 ## 📋 项目简介
 
-基于多维统计推断与隐马尔可夫模型（HMM）的城市空气质量监测预警系统。使用纯统计学方法（非机器学习）分析PM2.5数据，实现**由浅入深**的完整统计建模流程：数据探索 → 统计推断 → 回归建模 → 分类预测 → 时间序列预测。
+基于多维统计推断的城市空气质量监测分析系统。使用纯统计学方法（非机器学习）分析PM2.5数据，实现**由浅入深**的完整统计建模流程：数据探索 → 统计推断 → 回归建模 → 分类预测。
 
 ## 🚀 快速开始
 
@@ -35,7 +35,7 @@ streamlit run Code/app.py
 Stat-Modeling/
 ├── Code/                          # 核心代码模块
 │   ├── __init__.py                # 包初始化文件
-│   ├── app.py                     # Streamlit主应用（6个页面）
+│   ├── app.py                     # Streamlit主应用（5个页面）
 │   ├── data_preprocessing.py      # 数据预处理（插值、异常值、Log变换、正态性检验）
 │   ├── statistical_inference.py   # 统计推断（T检验、ANOVA、相关分析）
 │   ├── feature_selection.py       # 特征选择（Lasso）⭐ V3新增
@@ -43,9 +43,7 @@ Stat-Modeling/
 │   ├── bayesian_models.py         # 贝叶斯模型 ⭐ V3新增
 │   ├── classification_models.py   # 分类模型（Logistic/NB）⭐ V3新增
 │   ├── model_evaluation.py        # 模型评估 ⭐ V3新增
-│   ├── glm_model.py               # 广义线性模型（Gamma分布族）
-│   ├── arima_model.py             # ARIMA时间序列模型
-│   └── hmm_model.py               # 隐马尔可夫模型
+│   └── glm_model.py               # 广义线性模型（Gamma分布族）
 ├── Data/                          # 数据目录
 │   ├── beijing+pm2+5+data.zip     # UCI北京PM2.5数据集
 │   └── README.md                  # 数据说明文档
@@ -83,18 +81,12 @@ Stat-Modeling/
 - **贝叶斯方法**：参数后验分布可视化、可信区间
 
 ### 页面4：🎯 分类与状态 ⭐ V3新增
-- **分类模型对比**：Logistic Regression vs Naive Bayes vs HMM
+- **分类模型对比**：Logistic Regression vs Naive Bayes
 - **混淆矩阵**：各模型的分类结果可视化
 - **ROC曲线**：模型分类性能对比
 - **评估指标**：Accuracy、Precision、Recall、F1-Score、AUC
 
-### 页面5：⚠️ 预警中心
-- **HMM状态识别**：隐马尔可夫模型推断空气质量状态
-- **状态转移矩阵**：各状态间转移概率
-- **ADF平稳性检验**：Augmented Dickey-Fuller Test
-- **ARIMA预测**：短期PM2.5浓度趋势预测（含95%置信区间）
-
-### 页面6：📋 评估中心 ⭐ V3新增
+### 页面5：📋 评估中心 ⭐ V3新增
 - **统一模型评估**：所有模型的评估指标汇总
 - **回归模型评估**：RMSE、MAE、R²、AIC、BIC
 - **分类模型评估**：Accuracy、Precision、Recall、F1、AUC
@@ -104,10 +96,9 @@ Stat-Modeling/
 - **Python 3.8+**
 - **Streamlit** - Web应用框架
 - **streamlit-option-menu** - 美化导航菜单
-- **statsmodels** - 统计建模（OLS、Ridge、GLM、ARIMA）
+- **statsmodels** - 统计建模（OLS、Ridge、GLM）
 - **scipy** - 统计检验（T检验、ANOVA、K-S检验）
 - **scikit-learn** - Lasso、Ridge、Logistic、Naive Bayes
-- **hmmlearn** - 隐马尔可夫模型
 - **pandas/numpy** - 数据处理
 - **matplotlib/seaborn/plotly** - 数据可视化
 
@@ -136,12 +127,10 @@ Stat-Modeling/
 | **贝叶斯方法** | Bayesian Ridge Regression，后验分布分析 ⭐ V3新增 | ✅ |
 | **广义线性回归** | GLM（Gamma分布族 + Log链接） | ✅ |
 
-### 分类与时序
+### 分类
 | 章节 | 实现内容 | 状态 |
 |------|---------|------|
 | **分类模型** | Logistic Regression、Naive Bayes ⭐ V3新增 | ✅ |
-| **时间序列分析** | ARIMA预测、ADF平稳性检验 | ✅ |
-| **HMM** | 隐马尔可夫模型（状态推断、转移矩阵） | ✅ |
 
 ## 📝 数据要求
 
